@@ -1,0 +1,301 @@
+---
+title: "Lab2"
+author: 'Our Names'
+output:
+  pdf_document
+header-includes:
+ \usepackage{wrapfig}
+ \usepackage{float}
+ \floatplacement{figure}{H}
+---
+
+```{r load packages and set options, include=FALSE}
+library(tidyverse)
+library(magrittr)
+library(stargazer)
+library(sf)
+library(units)
+library(nngeo)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(pbapply)
+library(tidyr)
+library(lmtest)
+library(furrr)
+library(sandwich)
+library(patchwork)
+library(gridExtra)
+library(moments)
+library(stringr)
+library(car)
+library(lubridate)
+library(GGally)
+library(fuzzyjoin)
+library(stringi)
+theme_set(theme_bw())
+```
+
+```{r, load health data}
+df_health <- read.csv("../data/external/PLACES__Local_Data_for_Better_Health__Census_Tract_Data_2019_filtered.csv")
+
+# extract lat long from Geolocation column
+df_health <- df_health %>%
+  mutate(Longitude = as.numeric(str_extract(Geolocation, "(?<=\\()(-?\\d+\\.\\d+)")),
+         Latitude = as.numeric(str_extract(Geolocation, "(-?\\d+\\.\\d+)(?=\\))")))
+
+# separate asthma and smoking
+df_asthma <- df_health[df_health$MeasureId == "CASTHMA", ]
+df_smoking <- df_health[df_health$MeasureId == "CSMOKING", ]
+
+# create a lookup df for State and StateAbbr for later joins 
+df_state_lookup <- distinct(df_asthma, StateDesc, StateAbbr)
+
+# merge smoking and asthma as columns
+df_asthma_smoking <- merge(df_asthma, df_smoking, by = "Geolocation")
+
+df_asthma_smoking <- df_asthma_smoking %>%
+  dplyr::select(StateAbbr.x, StateDesc.x, CountyName.x, CountyFIPS.x, LocationName.x, Data_Value.x, TotalPopulation.x, Data_Value.y, Latitude.x, Longitude.x) %>%
+  rename(StateAbbr=StateAbbr.x, StateDesc=StateDesc.x, CountyName=CountyName.x, CountyFIPS=CountyFIPS.x, LocationName=LocationName.x, AsthmaRate=Data_Value.x, TotalPopulation=TotalPopulation.x, SmokingRate=Data_Value.y, Latitude = Latitude.x, Longitude = Longitude.x)
+
+# make asthma_smoking County column lowercase
+df_asthma_smoking$CountyName <- tolower(df_asthma_smoking$CountyName)
+```
+
+```{r HS Test}
+table(df_asthma_smoking$StateAbbr)
+```
+
+```{r, load agriculture data}
+df_ag_ast_fires <- read.csv("../data/external/agriculture/asset_cropland-fires_emissions.csv")
+
+# convert WKT polygons to sf objects
+df_ag_ast_fires <- df_ag_ast_fires %>% 
+  mutate(Polygon_sf = st_as_sfc(st_astext))
+
+# calculate center of each polygon, add new columns for lat long
+df_ag_ast_fires <- df_ag_ast_fires %>% 
+  mutate(centroid = st_centroid(Polygon_sf),
+         latitude = st_coordinates(centroid)[, 2],
+         longitude = st_coordinates(centroid)[, 1])
+
+```
+
+```{r, check size of each asset - rerun a few times}
+# Define the polygon coordinates
+polygon <- sample(df_ag_ast_fires$Polygon_sf, 1)
+
+# Assign CRS (EPSG:4326) to the polygon
+polygon_wgs84 <- st_sfc(polygon, crs = 4326)
+
+# Transform to a geographic CRS with units in meters (EPSG:5070)
+polygon_meters <- st_transform(polygon_wgs84, 5070)
+
+# Extract coordinates from the transformed polygon
+coords_meters <- st_coordinates(polygon_meters)[, 1:2]
+
+# Calculate lengths of each side in meters
+length1 <- st_distance(st_point(coords_meters[1,]), st_point(coords_meters[2,]))
+length2 <- st_distance(st_point(coords_meters[2,]), st_point(coords_meters[3,]))
+length3 <- st_distance(st_point(coords_meters[3,]), st_point(coords_meters[4,]))
+length4 <- st_distance(st_point(coords_meters[4,]), st_point(coords_meters[1,]))
+
+# Calculate area in square meters
+area_sq_meters <- st_area(polygon_meters)
+
+# Convert square meters to square miles (1 square mile = 2.58999e+6 square meters)
+area_sq_miles <- area_sq_meters / 2.58999e+6
+
+# Print the results
+cat("Lengths of each side in meters:\n",
+    "Side 1:", as.numeric(length1), "\n",
+    "Side 2:", as.numeric(length2), "\n",
+    "Side 3:", as.numeric(length3), "\n",
+    "Side 4:", as.numeric(length4), "\n\n",
+    "Area in square miles:", as.numeric(area_sq_miles))
+```
+
+```{r, transform emissions into emissions/sq_mi}
+
+# Function to calculate the area of a polygon in square miles
+calculate_area_sq_miles <- function(polygon) {
+  polygon_wgs84 <- st_sfc(polygon, crs = 4326)
+  polygon_meters <- st_transform(polygon_wgs84, 5070)
+  area_sq_meters <- st_area(polygon_meters)
+  area_sq_miles <- area_sq_meters / 2.58999e+6
+  return(as.numeric(area_sq_miles))
+}
+
+# Create a new column with the area in square miles
+df_ag_ast_fires$asset_sq_miles <- calculate_area_sq_miles(df_ag_ast_fires$Polygon_sf)
+
+# Create a new column with the emissions per square mile
+df_ag_ast_fires$emissions_per_sq_mile <- df_ag_ast_fires$emissions_quantity / df_ag_ast_fires$asset_sq_miles
+
+```
+
+```{r, filtering}
+# filter down to ch4 emissions and formatting the month
+df_af_fires <- df_ag_ast_fires %>%
+  filter(gas == "ch4") %>%
+  dplyr::select(asset_id, start_time, emissions_per_sq_mile, asset_name, latitude, longitude) %>%
+  mutate(start_time = as.Date(start_time, format = "%Y-%m-%d")) 
+
+# parse out State and join to get the StateAbbr
+df_af_fires$StateDesc <- str_extract(df_af_fires$asset_name, "(?<=United States_)[[:alpha:][:space:]]+(?=_)")
+df_af_fires <- merge(df_af_fires, df_state_lookup, by = "StateDesc")
+```
+
+
+```{r, filter df_asthma_smoking to locations within 15 miles of an asset}
+
+df_af_fires_for_filter <- df_af_fires %>%
+                              dplyr::select(asset_id, latitude, longitude) %>%
+                              distinct()
+
+df_asthma_smoking_for_filter <- df_asthma_smoking %>%
+                              dplyr::select(LocationName, Latitude, Longitude) %>%
+                              distinct()
+
+# Convert dataframes to features 
+fires_feature <- st_as_sf(df_af_fires_for_filter, coords = c("longitude", "latitude"), crs = 4326)
+smoking_asthma_feature <- st_as_sf(df_asthma_smoking_for_filter, coords = c("Longitude", "Latitude"), crs = 4326)
+
+# Set distance threshold (15 miles to meters)
+distance_threshold <- as_units(15, "miles") %>% set_units("m")
+
+# Perform nearest-neighbor spatial join with distance constraint
+joined_sf <- st_nn(fires_feature, smoking_asthma_feature, maxdist = distance_threshold, progress = TRUE)
+
+# Extract the joined indices
+joined_indices <- map2_dfr(seq_along(joined_sf), joined_sf, function(i, x) {
+  if (length(x) == 0) {
+    return(NULL)
+  }
+  data.frame(df1_id = i, df2_id = unlist(x))
+})
+
+# Join the dataframes using the indices
+joined_df <- df_af_fires_for_filter[joined_indices$df1_id, ] %>%
+  cbind(df_asthma_smoking_for_filter[joined_indices$df2_id, ])
+
+# Convert back to a dataframe
+joined_df <- as.data.frame(joined_df)
+
+joined_df <- joined_df %>%
+                dplyr::select('asset_id','LocationName')
+
+df_af_fires <- df_af_fires %>%
+                  merge(joined_df, by = 'asset_id')
+
+df_fires_health <- merge(df_af_fires, df_asthma_smoking, by = c('LocationName', 'StateDesc','StateAbbr'))
+
+```
+
+
+```{r, grouping}
+## Average into yearly
+df_fires_health_avg <- aggregate(emissions_per_sq_mile ~ LocationName+StateDesc+StateAbbr+asset_id+asset_name+latitude+longitude+CountyName+CountyFIPS+AsthmaRate+TotalPopulation+SmokingRate+Latitude+Longitude, data = df_fires_health, mean)
+
+## Rename the columns
+## h_ stands indicates health data lat/long
+df_fires_health_avg <- df_fires_health_avg %>%
+  rename(asset_latitude = latitude,
+         asset_longitude = longitude,
+         h_latitude = Latitude,
+         h_longitude = Longitude,
+         h_TotalPopulation = TotalPopulation)
+
+```
+
+
+
+```{r, load yearly temp data}
+df_temp_yearly <- read.csv("../data/external/2019_US_avgtemp_county.csv")
+
+# parse out the StateAbbr and join to get the State
+df_temp_yearly$StateAbbr <- substr(df_temp_yearly$Location.ID, 1, 2)
+df_temp_yearly <- merge(df_temp_yearly, df_state_lookup, by = "StateAbbr")
+
+```
+
+```{r, load population density data}
+#df_pop <- read.csv("~/lab-2-lab2-h-nice/data/interim/population_density_by_county.csv")
+
+df_pop_temp <- read.csv("../data/interim/pop_temp.csv")
+
+# Convert the original County names to lowercase
+df_pop_temp$County <- tolower(df_pop_temp$County)
+
+# Remove "County", "Parish", "Area" and "City" from the County names
+df_pop_temp$County_new <- ifelse(grepl("st.$", df_pop_temp$County), 
+                                  sub(" county$", "", df_pop_temp$County),
+                                  df_pop_temp$County)
+
+df_pop_temp$County_new <- ifelse(grepl(" county$", df_pop_temp$County_new), 
+                                  sub(" county$", "", df_pop_temp$County_new),
+                                  df_pop_temp$County_new)
+
+df_pop_temp$County_new <- ifelse(grepl(" parish$", df_pop_temp$County_new), 
+                                  sub(" parish$", "", df_pop_temp$County_new),
+                                  df_pop_temp$County_new)
+
+df_pop_temp$County_new <- ifelse(grepl(" area$", df_pop_temp$County_new), 
+                                  sub(" area$", "", df_pop_temp$County_new),
+                                  df_pop_temp$County_new)
+
+df_pop_temp$County_new <- ifelse(grepl(" city$", df_pop_temp$County_new), 
+                                  sub(" city$", "", df_pop_temp$County_new),
+                                  df_pop_temp$County_new)
+
+```
+
+
+```{r, merge into final dataset}
+
+#correct county name
+df_fires_health_avg[df_fires_health_avg$CountyName == 'doã±a ana',]$CountyName = 'dona ana'
+
+#merge datasets
+df_final <- merge(df_fires_health_avg, df_pop_temp, by.x = c('CountyName','StateDesc'), by.y = c('County_new','State'), all.x = TRUE)
+
+#average by county level (this avoids counting counties with several tracked assets as worse than others with only 1 measurement)
+df_final <- df_final %>%
+  group_by(CountyName, StateAbbr) %>%
+  summarize(across(where(is.numeric), mean, na.rm = TRUE),
+            across(where(is.character), first),
+            across(where(is.factor), first))
+
+#confirm all assets are now matched to county in pop temp data
+df_final[is.na(df_final$County), ]
+
+```
+
+```{r}
+# update column Population
+# Remove commas from the Population column
+df_final$Population <- gsub(",", "", df_final$Population)
+
+# Convert the Population column to integer
+df_final$Population <- as.integer(df_final$Population)
+```
+
+```{r}
+
+set.seed(123)
+# Ungroup the dataset and use sample_n() to create the exploration set
+exploration_set <- df_final %>%
+  dplyr::ungroup() %>%
+  sample_frac(0.3)
+
+# Create a new dataframe containing the remaining 70% of the rows
+confirmation_set <- df_final %>%
+  anti_join(exploration_set)
+
+write.csv(exploration_set, "../data/processed/crop_burning_to_asthma_exploration.csv", row.names=FALSE)
+write.csv(confirmation_set, "../data/processed/crop_burning_to_asthma_confirmation.csv", row.names=FALSE)
+
+```
+
+
+

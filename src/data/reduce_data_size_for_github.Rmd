@@ -1,0 +1,20 @@
+
+```{r}
+df_asset_rice  <- read.csv("~/lab-2-lab2-h-nice/data/external/agriculture/asset_rice-cultivation-top500_emissions.csv")
+df_asset_fires <- read.csv("~/lab-2-lab2-h-nice/data/external/agriculture/asset_cropland-fires_emissions.csv")
+df_asset_fert  <- read.csv("~/lab-2-lab2-h-nice/data/external/agriculture/asset_synthetic-fertilizer-application-top500_emissions.csv")
+```
+
+
+```{r}
+df_asset_rice  <- df_asset_rice[df_asset_rice$start_time >= '2019-01-01' & df_asset_rice$start_time < '2020-01-01',]
+df_asset_fires <- df_asset_fires[df_asset_fires$start_time >= '2019-01-01' & df_asset_fires$start_time < '2020-01-01',]
+df_asset_fert  <- df_asset_fert[df_asset_fert$start_time >= '2019-01-01' & df_asset_fert$start_time < '2020-01-01',]
+
+write.csv(df_asset_rice, "~/lab-2-lab2-h-nice/data/external/agriculture/asset_rice-cultivation-top500_emissions.csv", row.names = FALSE)
+write.csv(df_asset_fires, "~/lab-2-lab2-h-nice/data/external/agriculture/asset_cropland-fires_emissions.csv", row.names = FALSE)
+write.csv(df_asset_fert, "~/lab-2-lab2-h-nice/data/external/agriculture/asset_synthetic-fertilizer-application-top500_emissions.csv", row.names = FALSE)
+
+```
+
+
